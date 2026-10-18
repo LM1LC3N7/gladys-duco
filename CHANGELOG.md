@@ -10,6 +10,8 @@ the notes of the version's GitHub Release.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-18
+
 ### Added
 
 - Duco ventilation read over the local API of the Connectivity Board (no
@@ -45,4 +47,5 @@ the notes of the version's GitHub Release.
 - "Test the connection" button; documentation in English and French;
   `LICENSE` and `THIRD_PARTY_NOTICES.md` shipped in the image.
 
-[Unreleased]: https://github.com/LM1LC3N7/gladys-duco/commits/main
+[Unreleased]: https://github.com/LM1LC3N7/gladys-duco/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/LM1LC3N7/gladys-duco/releases/tag/v0.1.1

@@ -1,6 +1,6 @@
 {
   "name": "gladys-duco",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Gladys Assistant external integration for Duco ventilation (Duco Connectivity Board): ventilation state, flow, CO2, humidity and temperatures per node, optional ventilation mode, over the local API. Unofficial, not affiliated with Duco.",
   "type": "module",
