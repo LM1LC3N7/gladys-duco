@@ -21,11 +21,25 @@ the notes of the version's GitHub Release.
   heat recovery boxes. Node names from the Duco app.
 - The ventilation mode as a list (automatic, manual 1/2/3, permanent 1/2/3,
   away…) on the box and the valves, refused unless "Allow the commands" is
-  on (off by default); each command reads the node first and is answered
-  within Gladys' 5 s.
+  on (off by default). Each command reads the node again and is sent in the
+  same turn of the request queue (no other request in between), with the
+  option checked right before the sending; one still waiting behind a slow
+  read at its deadline leaves the queue and is refused unsent, about 3.5 s
+  after the click, so Gladys always gets the answer within its 5 s.
+- The list keeps every state it offered once (in a fixed order); a state the
+  node no longer advertises is refused unsent.
 - Reads every 30 s (configurable); failures retried after 30 s to 5
-  minutes; a 429 pauses every path, kept in `/data`; a secondary read failing
-  never blocks the nodes.
+  minutes; a 429 pauses every path, kept in `/data`, and the state of the
+  nodes shows "Paused (HTTP 429)"; a secondary read failing never blocks the
+  nodes.
+- Box air temperatures and filter: read with a 5 s limit; on failure tried
+  again 5 minutes later, then every hour, logged only when their state
+  changes; after three error answers in a row (4xx or unreadable), not read
+  again until a restart.
+- Documentation: the flow may show as a fan in HomeKit but refuses every
+  command; Away and Permanent last until the next change, there is no "off";
+  picking the running timed state again does not restart its timer; the
+  list keeps its value when the node's state is not one of its options.
 - A node no longer reported by the box keeps its device, marked unreachable;
   the status names it. A republished device never loses a feature.
 - "Test the connection" button; documentation in English and French;

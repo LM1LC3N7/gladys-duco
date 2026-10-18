@@ -255,16 +255,34 @@ function unsupportedModule(response) {
   }
 }
 
-/** One request at a time; `first` jumps the queue (commands), never the request in flight. */
+/**
+ * One request (or one command session) at a time; `first` jumps the queue
+ * (commands), never the job in flight. `startBy`: a job still waiting at that
+ * time leaves the queue and is rejected LATE (nothing was sent).
+ */
 export class Gate {
-  constructor() {
+  constructor({ now = Date.now, timers = globalThis } = {}) {
+    this.now = now;
+    this.timers = timers;
     this.queue = [];
     this.busy = false;
   }
 
-  run(fn, { first = false } = {}) {
+  run(fn, { first = false, startBy } = {}) {
     return new Promise((resolve, reject) => {
-      const job = { fn, resolve, reject };
+      const job = { fn, resolve, reject, startBy, timer: undefined };
+      if (startBy !== undefined) {
+        job.timer = this.timers.setTimeout(
+          () => {
+            const index = this.queue.indexOf(job);
+            if (index !== -1) {
+              this.queue.splice(index, 1);
+              reject(new BoxError(ERROR_KINDS.LATE, 'Too late to send'));
+            }
+          },
+          Math.max(0, startBy - this.now()),
+        );
+      }
       if (first) {
         this.queue.unshift(job);
       } else {
@@ -279,10 +297,18 @@ export class Gate {
       return;
     }
     this.busy = true;
-    const { fn, resolve, reject } = this.queue.shift();
+    const job = this.queue.shift();
+    if (job.timer) {
+      this.timers.clearTimeout(job.timer);
+    }
     Promise.resolve()
-      .then(fn)
-      .then(resolve, reject)
+      .then(() => {
+        if (job.startBy !== undefined && this.now() > job.startBy) {
+          throw new BoxError(ERROR_KINDS.LATE, 'Too late to send');
+        }
+        return job.fn();
+      })
+      .then(job.resolve, job.reject)
       .finally(() => {
         this.busy = false;
         this.next();
@@ -291,10 +317,19 @@ export class Gate {
 }
 
 export class DucoClient {
-  constructor({ transport = httpRequest, now = Date.now } = {}) {
+  constructor({ transport = httpRequest, now = Date.now, timers = globalThis } = {}) {
     this.transport = transport;
     this.now = now;
-    this.gate = new Gate();
+    this.gate = new Gate({ now, timers });
+  }
+
+  /**
+   * A command session: holds the gate from the fresh read to the end of the
+   * POST, so no other request runs in between. First in the queue; refused
+   * LATE when it cannot start by `startBy`. Inside, requests pass `held: true`.
+   */
+  session(fn, { startBy }) {
+    return this.gate.run(fn, { first: true, startBy });
   }
 
   /**
@@ -304,18 +339,17 @@ export class DucoClient {
    */
   exchange(
     { host, port },
-    { method = 'GET', path, body, timeoutMs, deadline, first, minMs = 200 },
+    { method = 'GET', path, body, timeoutMs, deadline, first, minMs = 200, held = false },
   ) {
-    return this.gate.run(
-      async () => {
-        const timeout = deadline === undefined ? timeoutMs : deadline - this.now();
-        if (timeout < minMs) {
-          throw new BoxError(ERROR_KINDS.LATE, 'Too late to send');
-        }
-        return this.transport({ host, port, method, path, body, timeoutMs: timeout });
-      },
-      { first },
-    );
+    const job = async () => {
+      const timeout = deadline === undefined ? timeoutMs : deadline - this.now();
+      if (timeout < minMs) {
+        throw new BoxError(ERROR_KINDS.LATE, 'Too late to send');
+      }
+      return this.transport({ host, port, method, path, body, timeoutMs: timeout });
+    };
+    // Inside a command session the gate is already held.
+    return held ? job() : this.gate.run(job, { first });
   }
 
   /** A GET whose answer must be JSON (2xx). `optional`: a missing module resolves undefined. */
@@ -384,27 +418,34 @@ export class DucoClient {
    * POST /action/nodes/{node} SetVentilationState, never retried. Refused
    * unsent (LATE) when it cannot start before `startBy`; answered by `answerBy`.
    * Resolves the parsed result; a 2xx without a readable result is a
-   * PROTOCOL error (it may have been applied).
+   * PROTOCOL error (it may have been applied). `beforeSend()` runs right
+   * before the transport: what it throws is rethrown marked `notSent` and
+   * `beforeSend`. `held`: inside a command session (the gate is held).
    */
-  async setVentilationState(address, id, state, { startBy, answerBy }) {
+  async setVentilationState(address, id, state, { startBy, answerBy, beforeSend, held = false }) {
     if (!VENTILATION_STATES.includes(state) || nodeIdOf(id) === undefined) {
       throw Object.assign(new Error('Invalid command'), { notSent: true });
     }
-    const response = await this.gate.run(
-      async () => {
-        if (this.now() > startBy) {
-          throw new BoxError(ERROR_KINDS.LATE, 'Too late to send');
+    const job = async () => {
+      if (this.now() > startBy) {
+        throw new BoxError(ERROR_KINDS.LATE, 'Too late to send');
+      }
+      if (beforeSend) {
+        try {
+          beforeSend();
+        } catch (err) {
+          throw Object.assign(err, { notSent: true, beforeSend: true });
         }
-        return this.transport({
-          ...address,
-          method: 'POST',
-          path: PATHS.nodeAction(id),
-          body: JSON.stringify({ Action: SET_VENTILATION_STATE, Val: state }),
-          timeoutMs: Math.max(200, answerBy - this.now()),
-        });
-      },
-      { first: true },
-    );
+      }
+      return this.transport({
+        ...address,
+        method: 'POST',
+        path: PATHS.nodeAction(id),
+        body: JSON.stringify({ Action: SET_VENTILATION_STATE, Val: state }),
+        timeoutMs: Math.max(200, answerBy - this.now()),
+      });
+    };
+    const response = await (held ? job() : this.gate.run(job, { first: true, startBy }));
     if (response.status < 200 || response.status > 299) {
       throw statusError(response, this.now());
     }

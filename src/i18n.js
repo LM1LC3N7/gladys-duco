@@ -79,6 +79,7 @@ export const STATE_TEXTS = {
       ? both(`Unknown state (${code})`, `État inconnu (${code})`)
       : both('Unknown state', 'État inconnu'),
   offline: both('Box unreachable', 'Box injoignable'),
+  paused: both('Paused (HTTP 429)', 'En pause (HTTP 429)'),
   missing: both('Node no longer reported by the box', 'Nœud absent de la box'),
 };
 

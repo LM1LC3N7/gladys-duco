@@ -14,6 +14,7 @@ import { registerHandlers } from '../src/handlers.js';
 import { memoryStore } from '../src/store.js';
 import { HOST, NOW, SERIAL, fakeBox, settle } from './fixtures/fakeBox.js';
 
+const HOUR_MS = 60 * MINUTE;
 const CONFIG = { address: HOST };
 const ALLOWED = { address: HOST, allow_commands: true };
 const device = (node) => `ext:test-integration:duco:${SERIAL}-${node}`;
@@ -330,6 +331,137 @@ test('the option turned off during the fresh read: not sent', async (t) => {
   assert.equal(server.commands().length, 0);
 });
 
+test('I: a command session holds the queue from the fresh read to the POST', async (t) => {
+  const server = fakeBox({ delays: { '/info/nodes/1': 500 } });
+  const { app, select, advance } = await setup(t, { config: ALLOWED, server });
+  const before = server.requests.length;
+  const pending = select('MAN2', { wait: 0 });
+  await settle();
+  // A poll comes while the session reads the node: it waits for the POST.
+  const poll = app.tick();
+  await advance(2 * SECOND, 100);
+  const ack = await pending;
+  await poll;
+  assert.equal(ack.success, true, ack.error);
+  assert.deepEqual(server.paths().slice(before, before + 3), [
+    'GET /info/nodes/1',
+    'POST /action/nodes/1',
+    'GET /info/nodes',
+  ]);
+});
+
+test('A: the option turned off after the decision is caught right before the transport', async (t) => {
+  const server = fakeBox();
+  const { app, select } = await setup(t, { config: ALLOWED, server });
+  // Turned off by the last check only (what checkBeforeSend reads at that moment).
+  const check = app.checkBeforeSend.bind(app);
+  let calls = 0;
+  app.checkBeforeSend = (...args) => {
+    calls += 1;
+    if (calls === 3) {
+      app.config = { ...app.config, allowCommands: false };
+    }
+    return check(...args);
+  };
+  const ack = await select('MAN1');
+  assert.equal(calls, 3, 'arrival, after the decision, right before the transport');
+  assert.equal(ack.success, false);
+  assert.match(ack.error, /Autoriser les commandes/);
+  assert.equal(server.commands().length, 0);
+});
+
+test('a command behind a slow poll leaves the queue at its deadline: not sent, answered in time', async (t) => {
+  const server = fakeBox();
+  const { gladys, app, advance } = await setup(t, { config: ALLOWED, server });
+  server.box.delays['/info/nodes'] = 9 * SECOND;
+  const poll = app.tick();
+  await settle();
+  const d = gladys.fake.devices.find((x) => x.external_id === device(1));
+  const ack = gladys.fake.setValue(
+    d,
+    d.features.find((f) => f.external_id === feature(1, 'ventilation')),
+    'MAN1',
+  );
+  let answered;
+  ack.then(() => (answered = Date.now()));
+  await advance(4 * SECOND, 100);
+  const result = await ack;
+  assert.equal(result.success, false);
+  assert.match(result.error, /trop lentement.*non envoyée/);
+  assert.ok(answered - NOW <= 3_500 + 2 * SECOND, `answered after ${answered - NOW} ms`);
+  await advance(6 * SECOND, 100);
+  await poll;
+  assert.equal(server.commands().length, 0);
+  assert.equal(server.paths().filter((p) => p === 'GET /info/nodes/1').length, 0);
+});
+
+test('C: the select keeps the created options; the command refuses those no longer advertised', async (t) => {
+  const server = fakeBox();
+  const { gladys, select, advance } = await setup(t, { config: ALLOWED, server });
+  server.box.actions.Nodes[0].Actions[0].Enum = ['AUTO', 'MAN1'];
+  await advance(61 * MINUTE, MINUTE);
+  const options = discovered(gladys, 1).features.find((f) => f.type === 'select').supported_options;
+  assert.equal(options.length, 17);
+  assert.deepEqual(
+    options.slice(0, 3).map((o) => o.value),
+    ['AUTO', 'AUT1', 'AUT2'],
+  );
+  const refused = await select('EMPT');
+  assert.match(refused.error, /n'accepte pas/);
+  const ok = await select('MAN1');
+  assert.equal(ok.success, true, ok.error);
+  assert.equal(server.commands().length, 1);
+});
+
+test('D: an optional module failing: tried again at 5 min then hourly, logged once, readings dropped', async (t) => {
+  const server = fakeBox();
+  server.box.statuses['/info?module=Ventilation'] = 500;
+  const logs = [];
+  const { gladys, advance } = await setup(t, { server, logs });
+  const asked = () => server.paths().filter((p) => p.includes('module=Ventilation')).length;
+  assert.equal(asked(), 1);
+  assert.ok(!roles(discovered(gladys, 1)).includes('temperature-outdoor'));
+  await advance(4 * MINUTE + 30 * SECOND, 30 * SECOND);
+  assert.equal(asked(), 1);
+  await advance(MINUTE, 30 * SECOND);
+  assert.equal(asked(), 2);
+  await advance(55 * MINUTE, MINUTE);
+  assert.equal(asked(), 2);
+  await advance(10 * MINUTE, MINUTE);
+  assert.equal(asked(), 3);
+  assert.equal(logs.filter((l) => l.includes('ventilation failed')).length, 1);
+  // Back: read at each poll again, logged once.
+  delete server.box.statuses['/info?module=Ventilation'];
+  await advance(61 * MINUTE, MINUTE);
+  const now = asked();
+  await advance(2 * MINUTE, 30 * SECOND);
+  assert.equal(asked(), now + 4);
+  assert.equal(logs.filter((l) => l.includes('ventilation read again')).length, 1);
+  // The feature appears in Discovery now that the module answers.
+  assert.ok(roles(discovered(gladys, 1)).includes('temperature-outdoor'));
+  // The other module and the nodes never stopped.
+  assert.equal(last(gladys, 1, 'filter-remaining'), 87);
+});
+
+test('E: three 4xx in a row: the module is absent until a restart', async (t) => {
+  const server = fakeBox();
+  server.box.statuses['/info?module=HeatRecovery'] = 404;
+  const logs = [];
+  const { advance } = await setup(t, { server, logs });
+  const asked = () => server.paths().filter((p) => p.includes('module=HeatRecovery')).length;
+  await advance(3 * HOUR_MS, 5 * MINUTE);
+  assert.equal(asked(), 3);
+  await advance(3 * HOUR_MS, 5 * MINUTE);
+  assert.equal(asked(), 3);
+  assert.equal(logs.filter((l) => l.includes('not read until a restart')).length, 1);
+  // A timeout is not counted as a lasting answer: optional reads use 5 s.
+  assert.ok(
+    server.requests
+      .filter((r) => /module=(Ventilation|HeatRecovery)$/.test(r.path))
+      .every((r) => r.timeoutMs === 5 * SECOND),
+  );
+});
+
 test('the fresh read fails: refused, nothing sent', async (t) => {
   const server = fakeBox();
   const { select } = await setup(t, { config: ALLOWED, server });
@@ -421,6 +553,9 @@ test('a 429 on the command: every path pauses, kept in /data and across a reconn
   const paused = await select('MAN2');
   assert.match(paused.error, /ralentir/);
   assert.match(message(gladys).fr, /HTTP 429/);
+  // Paused, not unreachable: the box answered.
+  assert.equal(last(gladys, 1, 'state'), 'En pause (HTTP 429)');
+  assert.equal(transportOf(gladys, 1), DEVICE_TRANSPORTS.LOCAL);
   await advance(6 * MINUTE, 10 * SECOND);
   assert.ok(server.paths().filter((p) => p === 'GET /info/nodes').length > reads);
 });

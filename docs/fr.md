@@ -64,13 +64,35 @@ changer, mais seulement par une action explicite, et seulement si les
 commandes sont autorisées. Attention : le chat IA de Gladys (MCP) peut créer
 et lancer une telle scène.
 
+Le **débit** est en lecture seule. HomeKit peut le montrer comme un
+ventilateur, mais toute commande envoyée sur le débit (allumer, éteindre,
+changer la vitesse) est refusée : seul le mode de ventilation se commande.
+
+À savoir sur les modes :
+
+- **Absent** et **Permanent 1/2/3** durent jusqu'au prochain changement de
+  mode. Il n'y a **pas de mode « arrêt »** : la ventilation ne s'éteint pas
+  depuis Gladys.
+- **Manuel** est temporisé (durée simple, double ou triple). **Rechoisir le
+  mode temporisé déjà en cours ne relance pas sa minuterie** : rien n'est
+  envoyé, pour ménager le quota d'écritures de la box. Pour la relancer,
+  choisissez un autre mode puis revenez.
+- Si le nœud est dans un état que la liste ne propose pas (un état inconnu,
+  ou que le nœud n'annonce pas), la liste **garde sa dernière valeur** :
+  regardez « État de la ventilation », qui affiche toujours l'état réel.
+- Un mode proposé une fois reste dans la liste, même si le nœud ne l'annonce
+  plus ; il est alors refusé sans être envoyé.
+
 Avant chaque commande, l'intégration **relit le nœud** et décide sur cette
-lecture seule ; l'option est revérifiée juste avant l'envoi. Un mode déjà
-actif n'est pas renvoyé (la box compte ses écritures). Une commande qui ne
-peut pas partir dans les 3,5 secondes est refusée sans être envoyée (une box
-lente peut donc refuser). Si la box ne confirme pas (silence, erreur 5xx),
-Gladys affiche « Commande envoyée, sans confirmation » : vérifiez l'état,
-relu 5 puis 20 secondes plus tard. Une commande à la fois.
+lecture seule ; aucune autre requête ne passe entre cette relecture et
+l'envoi, et l'option est revérifiée juste avant l'envoi. Un mode déjà actif
+n'est pas renvoyé (la box compte ses écritures). Une commande qui ne peut
+pas partir dans les 3,5 secondes est refusée sans être envoyée, y compris
+quand elle attend derrière une lecture lente (une box lente peut donc
+refuser) ; Gladys reçoit la réponse dans ses 5 secondes. Si la box ne
+confirme pas (silence, erreur 5xx), Gladys affiche « Commande envoyée, sans
+confirmation » : vérifiez l'état, relu 5 puis 20 secondes plus tard. Une
+commande à la fois.
 
 ## Erreurs et limites
 
@@ -83,7 +105,12 @@ relu 5 puis 20 secondes plus tard. Une commande à la fois.
 - **429 (trop de requêtes)**, par exemple quand la box a épuisé son quota
   d'écritures : pause de 1 minute à 6 heures pour tout (lectures, bouton,
   commandes), jamais plus courte que l'intervalle, gardée dans `/data` après
-  un redémarrage.
+  un redémarrage. Pendant la pause, « État de la ventilation » affiche « En
+  pause (HTTP 429) ».
+- **Températures de l'air et filtre** : si leur lecture échoue, nouvel essai
+  5 minutes plus tard, puis toutes les heures ; après trois réponses
+  d'erreur de suite (4xx ou réponse illisible), elles ne sont plus lues
+  jusqu'au redémarrage de l'intégration. Les nœuds ne sont jamais bloqués.
 - Les requêtes vers la box partent une à la fois ; l'intégration ne lit
   jamais les parties de l'API qui contiennent la clé Wi-Fi.
 - Pas encore : zones, identification des nœuds, consigne de température du

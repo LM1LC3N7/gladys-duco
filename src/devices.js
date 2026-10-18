@@ -273,12 +273,13 @@ export function stateText(node, language) {
 
 /**
  * The current values of one node's device. `status`: 'online', 'offline'
- * (box unreachable) or 'missing' (no longer reported by the box): then only
+ * (box unreachable), 'missing' (no longer reported by the box) or 'paused'
+ * (a 429 pause): then only
  * the state text changes, Gladys keeps the last value of the others.
  */
 export function deviceStates(ids, node, { status = 'online', box = {}, options, language }) {
   if (status !== 'online') {
-    const message = status === 'offline' ? STATE_TEXTS.offline : STATE_TEXTS.missing;
+    const message = STATE_TEXTS[status] ?? STATE_TEXTS.offline;
     return [
       { device_feature_external_id: ids.feature(FEATURES.STATE), text: word(message, language) },
     ];

@@ -145,6 +145,8 @@ export const TIMINGS = {
   slowRefresh: HOUR,
   /** ... and again 5 minutes after a failure, or when a new node appears. */
   slowRetry: 5 * MINUTE,
+  /** A read of an optional module (box temperatures, filter): never holds the queue long. */
+  optionalTimeout: 5 * SECOND,
   /** The publisher sends what is pending every second; unchanged states again every 30 min. */
   flushInterval: SECOND,
   stateHeartbeat: 30 * MINUTE,

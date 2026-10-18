@@ -20,7 +20,7 @@
 
 import { DEVICE_TRANSPORTS, createLogger } from '@gladysassistant/integration-sdk';
 import { addressKey, normalizeConfig } from './config.js';
-import { SECOND, TIMINGS, VENTILATION_STATES, VENTILATION_TYPES } from './constants.js';
+import { FEATURES, SECOND, TIMINGS, VENTILATION_STATES, VENTILATION_TYPES } from './constants.js';
 import {
   COMMAND_ROLES,
   buildDevice,
@@ -41,6 +41,22 @@ import { ERROR_KINDS } from './duco/http.js';
 const both = (en, fr) => ({ en, fr });
 const join = (a, b) => both(`${a.en} ${b.en}`, `${a.fr} ${b.fr}`);
 
+/** The optional modules and the readings each gives. */
+const MODULE_READINGS = {
+  ventilation: ['outdoor', 'supply', 'extract', 'exhaust'],
+  heatRecovery: ['filterDays'],
+};
+/** Answers in a row that will not change (4xx, wrong shape) before a module counts as absent. */
+const MODULE_MAX_ERRORS = 3;
+
+const freshModules = () =>
+  Object.fromEntries(
+    Object.keys(MODULE_READINGS).map((module) => [
+      module,
+      { absent: false, failing: false, retries: 0, errors: 0, nextAt: 0 },
+    ]),
+  );
+
 /** The box as nothing was read yet. */
 const freshBox = (address) => ({
   address,
@@ -60,8 +76,8 @@ const freshBox = (address) => ({
   names: new Map(),
   /** Box-level readings: temperatures, filter. */
   readings: {},
-  /** Optional modules: undefined (not asked yet), true, false (the box has none). */
-  modules: { ventilation: undefined, heatRecovery: undefined },
+  /** Optional modules: absent, failing, retries, errors in a row, next try. */
+  modules: freshModules(),
   slowAt: -Infinity,
   /** Every node id read since the start (a new one asks for the slow data at once). */
   nodeIds: new Set(),
@@ -84,7 +100,7 @@ export class DucoApp {
     this.now = now;
     this.timers = timers;
     this.store = store;
-    this.client = new DucoClient({ transport, now });
+    this.client = new DucoClient({ transport, now, timers });
     this.publisher = new StatePublisher({ gladys, logger, now, timers });
     this.config = normalizeConfig();
     this.memory = normalizeMemory(null, now());
@@ -277,7 +293,7 @@ export class DucoApp {
           this.logger.warn('Duco: another box answers at this address');
           Object.assign(box, { nodes: new Map(), options: new Map(), names: new Map() });
           Object.assign(box, { readings: {}, slowAt: -Infinity, nodeIds: new Set() });
-          box.modules = { ventilation: undefined, heatRecovery: undefined };
+          box.modules = freshModules();
         }
         box.board = board;
         box.verified = true;
@@ -342,18 +358,12 @@ export class DucoApp {
         },
       ]);
     }
-    for (const module of ['ventilation', 'heatRecovery']) {
-      if (box.modules[module] === false) {
+    for (const module of Object.keys(MODULE_READINGS)) {
+      const state = box.modules[module];
+      if (state.absent || this.now() < state.nextAt) {
         continue;
       }
-      steps.push([
-        module,
-        async () => {
-          const reading = await this.client[module](box.address, { timeoutMs });
-          box.modules[module] = reading !== undefined;
-          Object.assign(box.readings, reading ?? {});
-        },
-      ]);
+      steps.push([module, () => this.readModule(box, module)]);
     }
     for (const [name, step] of steps) {
       if (generation !== this.generation || this.paused) {
@@ -362,16 +372,65 @@ export class DucoApp {
       try {
         await step();
       } catch (err) {
-        this.logger.warn(`Duco: reading ${name} failed (${errorReason(err)})`);
         if (err.kind === ERROR_KINDS.RATE_LIMITED) {
+          this.logger.warn(`Duco: reading ${name} failed (${errorReason(err)})`);
           await this.pause(err);
           return;
         }
         if (name === 'actions' || name === 'names') {
+          this.logger.warn(`Duco: reading ${name} failed (${errorReason(err)})`);
           // Tried again in 5 minutes, not at every read.
           box.slowAt = this.now() - TIMINGS.slowRefresh + TIMINGS.slowRetry;
+        } else {
+          this.moduleFailed(box, name, err);
         }
       }
+    }
+  }
+
+  /** An optional module (box temperatures, filter): 5 s at most; absent on a 400 code 3. */
+  async readModule(box, module) {
+    const state = box.modules[module];
+    const reading = await this.client[module](box.address, {
+      timeoutMs: TIMINGS.optionalTimeout,
+    });
+    if (reading === undefined) {
+      state.absent = true;
+      this.logger.info(`Duco: the box has no ${module} module`);
+      return;
+    }
+    if (state.failing) {
+      this.logger.info(`Duco: ${module} read again`);
+    }
+    Object.assign(state, { failing: false, retries: 0, errors: 0, nextAt: 0 });
+    Object.assign(box.readings, reading);
+  }
+
+  /**
+   * An optional module failed: tried again in 5 minutes, then every hour;
+   * absent until a restart after 3 answers in a row that will not change
+   * (4xx, not the expected shape). Logged only when its state changes; its
+   * readings are dropped (never republished stale).
+   */
+  moduleFailed(box, module, err) {
+    const state = box.modules[module];
+    state.retries += 1;
+    state.nextAt = this.now() + (state.retries === 1 ? TIMINGS.slowRetry : TIMINGS.slowRefresh);
+    const lasting =
+      err.kind === ERROR_KINDS.PROTOCOL ||
+      (err.kind === ERROR_KINDS.HTTP && err.status >= 400 && err.status < 500);
+    state.errors = lasting ? state.errors + 1 : 0;
+    for (const key of MODULE_READINGS[module]) {
+      delete box.readings[key];
+    }
+    if (state.errors >= MODULE_MAX_ERRORS) {
+      state.absent = true;
+      this.logger.warn(
+        `Duco: ${module} keeps failing (${errorReason(err)}), not read until a restart`,
+      );
+    } else if (!state.failing) {
+      state.failing = true;
+      this.logger.warn(`Duco: reading ${module} failed (${errorReason(err)}), tried again later`);
     }
   }
 
@@ -459,9 +518,13 @@ export class DucoApp {
   /**
    * How a created device stands: 'online', 'offline' (the box does not
    * answer, or nothing read yet with an error) or 'missing' (the box answers
-   * without it). undefined while a first read is under way.
+   * without it), 'paused' during a 429 pause (the box answers, but is not
+   * read). undefined while a first read is under way.
    */
   standing({ serial, id }) {
+    if (this.box && this.paused) {
+      return 'paused';
+    }
     if (this.live) {
       return serial === this.serial && this.box.nodes.has(id) ? 'online' : 'missing';
     }
@@ -495,7 +558,26 @@ export class DucoApp {
       seen.add(role);
     }
     this.seen.set(key, seen);
-    return rolesOf(node, { seen, options: this.box.options.get(node.id) });
+    return rolesOf(node, { seen, options: this.offered(this.serial, node.id) });
+  }
+
+  /**
+   * The options the select shows: those the node advertises now, plus those
+   * of the created select (an option is never taken away from a device), in
+   * the order of VENTILATION_STATES. The command still refuses what the node
+   * no longer advertises.
+   */
+  offered(serial, id) {
+    const announced = (serial === this.serial ? this.box?.options.get(id) : undefined) ?? [];
+    const ids = nodeIds(this.gladys, serial, id);
+    const select = this.createdDevice(ids.device)?.features?.find(
+      (f) => f?.external_id === ids.feature(FEATURES.VENTILATION),
+    );
+    const created = Array.isArray(select?.supported_options)
+      ? select.supported_options.map((o) => o?.value)
+      : [];
+    const union = VENTILATION_STATES.filter((s) => announced.includes(s) || created.includes(s));
+    return union.length > 0 ? union : undefined;
   }
 
   async publishDevices() {
@@ -507,7 +589,7 @@ export class DucoApp {
       const ids = nodeIds(this.gladys, this.serial, id);
       return buildDevice(this.gladys, this.serial, node, {
         roles: this.rolesFor(node),
-        options: this.box.options.get(id),
+        options: this.offered(this.serial, id),
         board: this.box.board,
         language: this.config.language,
         created: this.createdDevice(ids.device),
@@ -541,7 +623,7 @@ export class DucoApp {
       const states = deviceStates(ids, status === 'online' ? this.nodeOf(entry.id) : {}, {
         status,
         box: this.box?.readings,
-        options: this.box?.options.get(entry.id),
+        options: this.offered(entry.serial, entry.id),
         language: this.config.language,
       });
       for (const { device_feature_external_id: id, ...value } of states) {
@@ -561,7 +643,11 @@ export class DucoApp {
       }
       entries.push({
         external_id: entry.device.external_id,
-        transport: status === 'online' ? DEVICE_TRANSPORTS.LOCAL : DEVICE_TRANSPORTS.UNREACHABLE,
+        // Paused by a 429, a box that answered stays local: it is not unreachable.
+        transport:
+          status === 'online' || (status === 'paused' && this.box?.online === true)
+            ? DEVICE_TRANSPORTS.LOCAL
+            : DEVICE_TRANSPORTS.UNREACHABLE,
       });
     }
     const json = JSON.stringify(entries);
@@ -717,7 +803,6 @@ export class DucoApp {
 
   async command(target, wanted, received) {
     const generation = this.generation;
-    const { id } = target;
     const sendBy = received + TIMINGS.commandSendBy;
     const options = this.checkBeforeSend(generation, target);
     if (!options.includes(wanted)) {
@@ -729,12 +814,31 @@ export class DucoApp {
       throw this.refusal(ERRORS.tooSlow);
     }
 
+    // One session holds the queue from the fresh read to the end of the POST:
+    // no other request runs in between. Still waiting at readBy - minRead
+    // (a slow read in flight): it leaves the queue, refused unsent.
+    try {
+      return await this.client.session(
+        () => this.commandSession(target, wanted, { generation, box, received, sendBy, readBy }),
+        { startBy: readBy - TIMINGS.commandMinRead },
+      );
+    } catch (err) {
+      if (err.kind === ERROR_KINDS.LATE) {
+        throw this.refusal(ERRORS.tooSlow);
+      }
+      throw err;
+    }
+  }
+
+  /** The command inside its session (the gate is held: requests pass `held`). */
+  async commandSession(target, wanted, { generation, box, received, sendBy, readBy }) {
+    const { id } = target;
     // The state just before acting, never the one in memory.
     let fresh;
     try {
       fresh = await this.client.node(box.address, id, {
         deadline: readBy,
-        first: true,
+        held: true,
         minMs: TIMINGS.commandMinRead,
       });
     } catch (err) {
@@ -779,8 +883,14 @@ export class DucoApp {
       result = await this.client.setVentilationState(box.address, id, wanted, {
         startBy: sendBy,
         answerBy: received + TIMINGS.commandAnswerBy,
+        held: true,
+        // The very last check, right before the transport: option, configuration, pause, box.
+        beforeSend: () => this.checkBeforeSend(generation, target),
       });
     } catch (err) {
+      if (err.beforeSend) {
+        throw err;
+      }
       const reason = errorReason(err);
       this.logger.warn(`Duco node ${id}: ${wanted} failed (${reason})`);
       if (err.kind === ERROR_KINDS.LATE) {

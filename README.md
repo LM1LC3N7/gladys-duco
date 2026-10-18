@@ -25,8 +25,9 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (DucoApp)
   an outage), `GET /info/nodes` every 30 s (configurable, 10 s – 10 min);
   `GET /action/nodes` and `GET /config/nodes?parameter=Name` every hour;
   `GET /info?module=Ventilation` and `?module=HeatRecovery` at each read
-  when the box has them (a 400 code 3 means it does not: never asked again
-  until a restart). A secondary read failing never blocks the nodes. The
+  when the box has them (5 s at most; a 400 code 3, or three 4xx/unreadable
+  answers in a row, means it does not: never asked again until a restart;
+  other failures retried after 5 min, then hourly). A secondary read failing never blocks the nodes. The
   broad `/info` and `/config` are never read (Wi-Fi keys). Failures retried
   after 30 s, 1, 2, 5 min, never under the interval.
 - **Devices**: `ext:<selector>:duco:<serial>-<node>` (board serial and node
@@ -35,9 +36,11 @@ Gladys ⇄ SDK ⇄ src/handlers.js ⇄ src/app.js (DucoApp)
   loses a feature (those of the created device are kept).
 - **Command** (`allow_commands`, off by default): the ventilation mode, a
   `text/select` of the known states the node advertises, on the box and the
-  valves only; never a switch nor a writable binary or fan. It reads the
-  node first and decides on that read only, checks the option again right
-  before sending, leaves within 3.5 s of the click or is refused unsent, and
+  valves only; never a switch nor a writable binary or fan. It holds the
+  request queue from a fresh read of the node to the end of the POST,
+  decides on that read only, checks the option again right before the
+  transport, leaves within 3.5 s of the click or is refused unsent (also when
+  still queued behind a slow read), and
   is answered by 4.3 s; a silence, a 5xx or a broken answer is "sent,
   without confirmation", followed by reads of the node 5 s and 20 s later.
   One at a time; never retried; not sent when already active. The ack never

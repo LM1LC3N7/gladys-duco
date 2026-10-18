@@ -61,11 +61,31 @@ Google Home, Alexa or HomeKit) never touches it. A scene can change it, but
 only through an explicit action, and only while the commands are allowed.
 Beware: the AI chat of Gladys (MCP) can create and run such a scene.
 
+The **flow** is read only. HomeKit may show it as a fan, but any command
+sent to the flow (on, off, speed) is refused: only the ventilation mode can
+be commanded.
+
+Good to know about the states:
+
+- **Away** and **Permanent 1/2/3** last until the next change. There is
+  **no "off" state**: the ventilation cannot be switched off from Gladys.
+- **Manual** is timed (single, double or triple time). **Picking the timed
+  state already running again does not restart its timer**: nothing is
+  sent, to spare the write budget of the box. To restart it, pick another
+  state, then come back.
+- When the node is in a state the list does not offer (an unknown state, or
+  one the node does not advertise), the list **keeps its last value**: look
+  at "Ventilation state", which always shows the real state.
+- A state offered once stays in the list, even when the node no longer
+  advertises it; it is then refused unsent.
+
 Before each command the integration **reads the node again** and decides on
-that read only; the option is checked again right before sending. A state
-already active is not sent again (the box counts its writes). A command that
-cannot leave within 3.5 seconds is refused unsent (a slow box may therefore
-refuse). If the box does not confirm (silence, a 5xx error), Gladys shows
+that read only; no other request runs between that read and the sending,
+and the option is checked again right before sending. A state already active
+is not sent again (the box counts its writes). A command that cannot leave
+within 3.5 seconds is refused unsent, also when it waits behind a slow read
+(a slow box may therefore refuse); Gladys gets the answer within its 5
+seconds. If the box does not confirm (silence, a 5xx error), Gladys shows
 "Command sent, without confirmation": check the state, read again 5 then 20
 seconds later. One command at a time.
 
@@ -79,7 +99,11 @@ seconds later. One command at a time.
 - **429 (too many requests)**, for example when the box used up its write
   budget: pause of 1 minute to 6 hours for everything (reads, button,
   commands), never shorter than the interval, kept in `/data` across a
-  restart.
+  restart. During the pause, "Ventilation state" shows "Paused (HTTP 429)".
+- **Air temperatures and filter**: when their read fails, new try 5 minutes
+  later, then every hour; after three error answers in a row (4xx or an
+  unreadable answer), they are not read again until the integration
+  restarts. The nodes are never blocked.
 - Requests to the box go one at a time; the integration never reads the
   parts of the API that hold the Wi-Fi key.
 - Not yet: zones, node identification, bypass temperature target, Wi-Fi

@@ -151,6 +151,37 @@ up to date at the end of every milestone.
   address or interval restarts the polling.
 - **Trusted network**: the API has no authentication: said in the manifest,
   the docs (fr/en) and the README.
+- **Review round 1 (2026-10-18)**:
+  - I1: a command is one **session** of the request gate, from the fresh
+    read of the node to the end of the POST (the gate is taken before the
+    read and released after the POST; requests inside pass `held`). The POST
+    gets a `beforeSend` callback that replays `checkBeforeSend` (option,
+    generation, pause, box live and same serial, options known) right before
+    the transport; what it throws is answered as is, nothing sent.
+  - I2: `Gate.run(fn, { first, startBy })`: a timer takes a job still queued
+    at `startBy` out of the queue and rejects it LATE. The session's
+    `startBy` is the last moment its fresh read can start (read deadline −
+    0.3 s); behind a slow poll the command is answered "too slow, not sent"
+    at about 2.2–3.5 s, within Gladys' 5 s. The POST keeps its own `startBy`
+    (3.5 s). CHANGELOG corrected (it promised the 5 s without this).
+  - I3: the select publishes the union of the options of the created select
+    and those the node advertises now, in the order of `VENTILATION_STATES`
+    (an option is never taken away from a device); the command still
+    refuses a state the node no longer advertises (`notOffered`).
+  - I4: optional modules (Ventilation, HeatRecovery) have their own state:
+    5 s timeout; on failure tried again 5 min later, then every hour; 3
+    lasting failures in a row (4xx, or PROTOCOL) → absent until a restart
+    (a timeout or a 5xx breaks the streak, it is not lasting); a 400 code 3
+    → absent at once; logged only when the state changes (failing, read
+    again, absent); the readings of a failing module are dropped, never
+    republished stale.
+  - M1: during a 429 pause every created device shows "Paused (HTTP 429)"
+    in its state text; its badge stays local when the box had answered.
+  - M2–M5 documented (fr/en): HomeKit may show the read-only flow as a fan,
+    every command on it is refused; picking the running timed state again
+    does not restart its timer (nothing sent, write budget); the select
+    keeps its value when the node's state is not one of its options; Away
+    and Permanent last until the next change, there is no "off".
 - **gladys_version >= 5.1.0** (as the sibling local modules); **categories
   `climate`, `environment`**, transport `local`.
 - **Not checked here (PIPELINE step 1, main session)**: duplicates in the

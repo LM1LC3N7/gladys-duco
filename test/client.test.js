@@ -170,6 +170,55 @@ test('the gate: one request at a time, commands first in the queue', async () =>
   assert.deepEqual(order, ['poll 1', 'command', 'poll 2']);
 });
 
+test('the gate: a job still queued at its startBy leaves the queue, LATE', async () => {
+  const timers = [];
+  const fakeTimers = {
+    setTimeout: (fn, ms) => timers.push({ fn, ms }) && timers.length,
+    clearTimeout: () => {},
+  };
+  const gate = new Gate({ now: () => 0, timers: fakeTimers });
+  let release;
+  const slow = gate.run(() => new Promise((resolve) => (release = resolve)));
+  let ran = false;
+  const late = gate.run(
+    async () => {
+      ran = true;
+    },
+    { first: true, startBy: 2_200 },
+  );
+  assert.equal(timers.at(-1).ms, 2_200);
+  timers.at(-1).fn();
+  await assert.rejects(late, { kind: ERROR_KINDS.LATE });
+  release();
+  await slow;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ran, false);
+  assert.equal(gate.queue.length, 0);
+});
+
+test('beforeSend refuses right before the transport: nothing sent', async () => {
+  let calls = 0;
+  const client = new DucoClient({
+    transport: async () => {
+      calls += 1;
+      return { status: 200, headers: {}, body: '{"Result":"SUCCESS"}' };
+    },
+    now: () => 0,
+  });
+  const refusal = new Error('disabled');
+  await assert.rejects(
+    client.setVentilationState({ host: 'x', port: 80 }, 1, 'MAN1', {
+      startBy: 1_000,
+      answerBy: 2_000,
+      beforeSend: () => {
+        throw refusal;
+      },
+    }),
+    (err) => err === refusal && err.notSent === true && err.beforeSend === true,
+  );
+  assert.equal(calls, 0);
+});
+
 test('a command that cannot start before its deadline is refused unsent', async () => {
   let calls = 0;
   const client = new DucoClient({
