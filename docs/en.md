@@ -1,61 +1,94 @@
-# Demo Devices Template
+# Duco for Gladys
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+Shows your **Duco** ventilation (DucoBox Energy, Focus, Silent Connect…
+fitted with the **Connectivity Board**) in Gladys through its **local API**:
+no cloud, no account, straight on your network.
+
+> **Never tested with a real Duco box.** Not affiliated with Duco. It talks
+> to the local API of the box as the python-duco-connectivity library (used
+> by Home Assistant) does.
+
+> **Security: the local API of the box has no password and no encryption.**
+> Any machine on your network can read it and change the ventilation. Keep
+> the box on a **trusted network** (never exposed to the Internet, ideally on
+> a separate network for connected devices).
 
 ## What you get
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+One device per **node** of the box: the box itself, zone valves, room
+controls and sensors. Depending on what the node measures:
 
-## Configuration
+| Feature                 | Content                                                                       |
+| ----------------------- | ----------------------------------------------------------------------------- |
+| Ventilation mode        | List: automatic, manual 1/2/3, permanent 1/2/3, away… (commands allowed only) |
+| Ventilation state       | Text: the current state ("Automatic", "Manual 2"…)                            |
+| Ventilation mode (read) | Text: automatic, manual, overruled, external…                                 |
+| Flow                    | In %, the flow level the box or the valve aims at                             |
+| Time remaining          | In seconds, for a timed (manual) state                                        |
+| CO2                     | In ppm (CO2 sensors)                                                          |
+| Humidity                | In % (humidity sensors)                                                       |
+| Temperature             | In °C, when the node gives one                                                |
+| Air temperatures        | Outdoor, supply, extract, exhaust, in °C (heat recovery boxes only)           |
+| Filter change in        | In days (heat recovery boxes only)                                            |
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+The ventilation mode exists on the box and the valves only (as in Home
+Assistant), and only with the states the node advertises. The node names
+are those given in the Duco app.
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+Read every 30 seconds by default (10 s to 10 min, configurable). Names and
+accepted states are read again every hour.
 
-## Actions
+## Installation
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+1. Give the box a **fixed IP address** in your router.
+2. Install the integration from the Gladys store.
+3. In its configuration, enter the **IP address of the Duco box**.
+4. Save, then add the nodes from the **Discovery** tab.
 
-## Scenes
+The **Test the connection** button reads the box once (at most every 10
+seconds). The Connectivity Board with Public API 2.1 or later is needed; the
+older Communication Board is not supported (the configuration screen says
+so).
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+## Command (off by default)
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+The **ventilation mode** refuses every command while **Allow the commands**
+is off. On, Gladys may pick one of the states the node accepts: automatic,
+manual 1/2/3 (timed, single, double or triple time), permanent 1/2/3, away…
 
-## Dashboard
+It is a **list**, never a switch: a "turn everything off" (from Gladys,
+Google Home, Alexa or HomeKit) never touches it. A scene can change it, but
+only through an explicit action, and only while the commands are allowed.
+Beware: the AI chat of Gladys (MCP) can create and run such a scene.
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+Before each command the integration **reads the node again** and decides on
+that read only; the option is checked again right before sending. A state
+already active is not sent again (the box counts its writes). A command that
+cannot leave within 3.5 seconds is refused unsent (a slow box may therefore
+refuse). If the box does not confirm (silence, a 5xx error), Gladys shows
+"Command sent, without confirmation": check the state, read again 5 then 20
+seconds later. One command at a time.
 
-## Troubleshooting
+## Errors and limits
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+- **Box unreachable**: "Ventilation state" shows "Box unreachable", the
+  devices turn unreachable, the other values keep their last value. New try
+  after 30 s, 1, 2 then 5 minutes, never faster than the interval.
+- **Node removed** from the box: its device stays, marked unreachable, with
+  "Node no longer reported by the box"; the configuration screen names it.
+- **429 (too many requests)**, for example when the box used up its write
+  budget: pause of 1 minute to 6 hours for everything (reads, button,
+  commands), never shorter than the interval, kept in `/data` across a
+  restart.
+- Requests to the box go one at a time; the integration never reads the
+  parts of the API that hold the Wi-Fi key.
+- Not yet: zones, node identification, bypass temperature target, Wi-Fi
+  signal, air quality indexes.
+- The logs never contain the text of the box's answers.
+
+## Credits
+
+Port of
+[python-duco-connectivity](https://github.com/ronaldvdmeer/python-duco-connectivity)
+(Ronald van der Meer, MIT, version 0.18.0), the library of Home Assistant's
+Duco integration. Apache-2.0 license.
