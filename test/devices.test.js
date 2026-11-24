@@ -1,14 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { FEATURES } from '../src/constants.js';
+import { createFakeGladys } from '@gladysassistant/integration-sdk/testing';
+import { FEATURES, VENTILATION_STATES } from '../src/constants.js';
 import {
   DEFINITIONS,
   ROLES,
+  buildDevice,
   deviceStates,
   keepCreatedFeatures,
   parseFeatureId,
   rolesOf,
 } from '../src/devices.js';
+import { assertCoreDevice } from './helpers/coreFeature.js';
 
 const ids = {
   device: 'ext:x:duco:abcd1234-1',
@@ -123,4 +126,26 @@ test('states: bounds respected, unknown state shown, offline changes only the st
   assert.deepEqual(deviceStates(ids, {}, { status: 'offline', language: 'fr' }), [
     { device_feature_external_id: ids.feature('state'), text: 'Box injoignable' },
   ]);
+});
+
+test('every feature has a numeric min and max and the other core fields', () => {
+  const gladys = createFakeGladys({ selector: 'duco' });
+  const nodes = [
+    { id: 1, type: 'BOX', name: '' },
+    { id: 2, type: 'VLVCO2RH', name: 'Bedroom' },
+    { id: 3, type: 'UCCO2' },
+  ];
+  let features = 0;
+  for (const node of nodes) {
+    for (const language of ['en', 'fr']) {
+      const device = buildDevice(gladys, 'abcd1234', node, {
+        roles: ROLES,
+        options: VENTILATION_STATES,
+        board: { model: 'Energy Comfort', apiVersion: '2.5' },
+        language,
+      });
+      features += assertCoreDevice(device, `${node.type} ${language}`);
+    }
+  }
+  assert.equal(features, 3 * 2 * ROLES.length);
 });

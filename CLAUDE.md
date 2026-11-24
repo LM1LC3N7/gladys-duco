@@ -8,7 +8,7 @@ already taken and the next milestones.
 
 A Gladys Assistant **external integration** of type `device`: a Node.js
 service (Node 22+, ESM, no build step) in its own sandboxed Docker container,
-talking to Gladys through `@gladysassistant/integration-sdk` (v0.15), its only
+talking to Gladys through `@gladysassistant/integration-sdk` (v0.16), its only
 runtime dependency (HTTP goes through `node:http`). It reads a Duco
 ventilation box (Connectivity Board) over its local API (no cloud, no
 account, no authentication) and shows each node on one Gladys device; the
@@ -19,7 +19,7 @@ tested with a real Duco box, not affiliated with Duco.
 
 ```bash
 npm install
-npm test                                  # node --test, the built-in runner
+npm test                                  # node --test --test-timeout=60000
 node --test test/app.test.js              # one file
 npm run lint                              # ESLint
 npm run format:check                      # Prettier, as the CI runs it
@@ -53,6 +53,12 @@ scripts/cover.mjs         cover.png generator
 
 ## Rules
 
+- **Features follow the core model.** Every feature has a non-empty `name`, a
+  numeric `min` and `max` (0/0 for text), boolean `read_only` and
+  `has_feedback`: Gladys refuses it otherwise, and the SDK's fake Gladys
+  (0.16.1) too; `test/helpers/coreFeature.js` checks every device kind.
+  Devices carry `should_poll: false` (Gladys 5.3 polls a device with
+  `poll_frequency` unless it says so).
 - **External ids are forever**: device `duco:<serial>-<node>`, features
   `ventilation`, `state`, `mode`, `flow`, `time-remaining`, `co2`,
   `humidity`, `temperature`, `temperature-outdoor`, `temperature-supply`,
