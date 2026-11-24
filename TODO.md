@@ -188,3 +188,8 @@ up to date at the end of every milestone.
   store, the core and the forum were checked when the batch was reserved
   (post #275). No Docker on this PC: the image was not built locally. The
   store validator runs at publication (main session).
+
+## Next patch
+
+- Migration review w11 r1 minors (`_lots/migration-reviews/w11-gladys-duco-r1.md`): the README `npm test` line omits `--test-timeout=60000`.
+- Test the `created` path of `buildDevice`.
